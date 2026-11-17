@@ -62,6 +62,21 @@ Cada escaneo guarda `data/scan.json` y un resumen en `data/history/` para compar
    nota, con cuotas por tramo, máximo 2 por sector y 2 por motivo. Se descarta cualquier contrato con un fallo
    crítico, y los tokens con liquidez en DEX inferior al 0,05 % de su capitalización sin exchange centralizado conocido.
 
+### Zona shitcoin (4 micro-caps de alto riesgo)
+
+Micro-caps de $1 M a $15 M entre las 1.000 monedas con más volumen de CoinGecko. Para entrar tienen que superar
+**todos** estos filtros; si menos de cuatro los superan, se muestran menos (nunca se rellena):
+
+- ≥ 10 días desde su primer pool, ≥ 250 operaciones diarias en DEX.
+- Liquidez en DEX ≥ $75 mil y ≥ 3 % de su capitalización; ≥ 30 % de esa liquidez bloqueada o quemada
+  (salvo proyectos de más de 6 meses que cotizan en exchanges centralizados).
+- Contrato limpio en **todos** los auditores, sin acuñación ni congelación, impuestos ≤ 1 %, top 10 ≤ 35 %.
+- Nada sobrecalentado (≤ +150 % en 7 días, ≤ +60 % en 24 h) ni subidas con promoción pagada en DexScreener.
+
+Puntúan por tracción (operaciones, rotación de la liquidez, compras frente a ventas), momentum, solidez
+(liquidez respecto a la capitalización, edad, holders, liquidez bloqueada) y seguridad; máximo dos por cadena.
+Se siguen aparte en el seguimiento de aciertos y la web avisa de «posible rug» si su liquidez cae más de un 40 %.
+
 ### Los nueve motivos
 
 | Motivo | Qué detecta |

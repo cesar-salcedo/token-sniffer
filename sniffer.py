@@ -97,9 +97,10 @@ EXCLUDE_CATS = [
     "stablecoins", "yield-bearing-stablecoins", "wrapped-tokens", "bridged-tokens",
     "liquid-staking-tokens", "liquid-restaking-tokens", "exchange-based-tokens",
     "tokenized-products", "tokenized-stock", "tokenized-gold", "tokenized-btc",
+    "xstocks-ecosystem", "bstocks-ecosystem", "ondo-tokenized-assets", "tokenized-exchange-traded-funds-etfs",
 ]
 EXCLUDE_NAME = re.compile(
-    r"\b(wrapped|bridged|staked|restaked|tokenized|xstock|usd[a-z]?\b|gold\b|treasur)", re.I)
+    r"\b(wrapped|bridged|staked|restaked|tokenized|\w*stock|etf\b|usd[a-z]?\b|gold\b|treasur)", re.I)
 
 ARCHETYPES = [
     {"id": "tendencia", "label": "Tendencia sólida",
@@ -803,7 +804,11 @@ def assess_evm(sec):
     creator = num(sec.get("creator_percent")) or 0
     chk("El creador tiene < 10 %", creator > 0.10, 10, False, f"{creator * 100:.1f} %")
     cex = (sec.get("is_in_cex") or {})
+    lp_locked = sum(num(h.get("percent")) or 0 for h in (sec.get("lp_holders") or [])
+                    if h.get("is_locked") in (1, "1") or str(h.get("address", "")).lower() in
+                    ("0x0000000000000000000000000000000000000000", "0x000000000000000000000000000000000000dead"))
     extra = {
+        "lp_locked": min(1.0, lp_locked) if sec.get("lp_holders") else None,
         "holders": int(num(sec.get("holder_count")) or 0) or None,
         "cex": cex.get("cex_list") if isinstance(cex, dict) and flag(cex.get("listed")) else None,
         "owner_renounced": renounced, "top10": conc,
@@ -909,7 +914,8 @@ def assess_rugcheck(d, mint):
     if lp is not None:
         notes.append(f"Liquidez bloqueada: {es_num(lp * 100 if lp <= 1 else lp, 0)} %")
     return {"name": "RugCheck", "what": "Riesgos del token en Solana", "score": score, "critical": critical,
-            "notes": notes, "url": f"https://rugcheck.xyz/tokens/{mint}"}
+            "notes": notes, "url": f"https://rugcheck.xyz/tokens/{mint}",
+            "lp_locked": (lp if lp <= 1 else lp / 100) if lp is not None else None}
 
 
 def combine_security(sources, checks, extra):
@@ -1165,6 +1171,336 @@ def select(cands):
 
 
 # ---------------------------------------------------------------------------
+# Zona shitcoin: micro-caps de alto riesgo con filtros muy estrictos
+# ---------------------------------------------------------------------------
+
+GEM_RANGE = (1e6, 15e6)
+GEM_PICKS = 4
+GEM_RULES = {"min_vol": 150e3, "min_liq": 75e3, "min_liq_ratio": 0.03, "min_age_days": 10,
+             "min_txns": 250, "max_top10": 0.35, "max_tax": 0.01, "min_lp_locked": 0.3,
+             "max_ch7": 150, "max_ch24": 60, "audit": 30}
+GEM_REASONS = [
+    {"id": "traccion", "label": "Tracción orgánica",
+     "desc": "Muchas operaciones y volumen alto para su liquidez, con más compras que ventas."},
+    {"id": "despegue", "label": "Despegue temprano",
+     "desc": "Token joven que ya superó sus primeras semanas, con el volumen acelerando y el precio subiendo."},
+    {"id": "superviviente", "label": "Superviviente en ascenso",
+     "desc": "Lleva meses cotizando, ha aguantado el mercado bajista y ahora gira al alza."},
+    {"id": "solidez", "label": "Base sólida",
+     "desc": "Liquidez profunda, contrato impecable y holders repartidos: la micro-cap más sana de su clase."},
+]
+
+
+def fetch_platforms(http):
+    data = http.get(f"{CG}/coins/list?include_platform=true", ttl=24 * 3600) or []
+    return {c["id"]: {k: v for k, v in (c.get("platforms") or {}).items() if k and v}
+            for c in data if isinstance(c, dict) and c.get("id")}
+
+
+def audit_contract(http, ch, addr):
+    gp = fetch_security(http, ch, addr)
+    second = fetch_rugcheck(http, addr) if ch == "solana" else fetch_honeypot(http, ch, addr)
+    sources, checks, extra = [], [], {}
+    if gp:
+        fn = assess_solana if ch == "solana" else assess_evm
+        score, critical, checks, extra = fn(gp)
+        sources.append(goplus_source(ch, addr, score, critical, checks))
+    if isinstance(second, dict):
+        try:
+            sources.append(assess_rugcheck(second, addr) if ch == "solana" else assess_honeypot(second, ch, addr))
+        except (KeyError, TypeError, ValueError):
+            pass
+    sec = combine_security(sources, checks, extra)
+    if sec.get("lp_locked") is None:
+        sec["lp_locked"] = next((x.get("lp_locked") for x in sources if x.get("lp_locked") is not None), None)
+    return sec
+
+
+def gem_dex(pairs, address):
+    base = summarize_dex(pairs, address)
+    if not base:
+        return None
+    mine = [p for p in pairs if ((p.get("baseToken") or {}).get("address") or "").lower() == address.lower()]
+    base["volume6"] = sum(num((p.get("volume") or {}).get("h6")) or 0 for p in mine)
+    info = next((p.get("info") for p in mine if p.get("info")), None) or {}
+    base["websites"] = [w.get("url") for w in (info.get("websites") or []) if isinstance(w, dict) and w.get("url")][:2]
+    base["socials"] = [{"type": x.get("type"), "url": x.get("url")} for x in (info.get("socials") or [])
+                       if isinstance(x, dict) and x.get("url")][:3]
+    base["boosts"] = max((num((p.get("boosts") or {}).get("active")) or 0) for p in mine)
+    return base
+
+
+def gem_safe(sec, ch, c):
+    """Filtro de seguridad duro para micro-caps: todo limpio, sin acuñación ni congelación, sin impuestos."""
+    if sec.get("level") != "limpio":
+        return False, "contrato no limpio en todos los auditores"
+    if (sec.get("top10") or 0) > GEM_RULES["max_top10"]:
+        return False, "demasiada concentración en el top 10"
+    if max(sec.get("buy_tax") or 0, sec.get("sell_tax") or 0) > GEM_RULES["max_tax"]:
+        return False, "impuestos de compra o venta"
+    lp = sec.get("lp_locked")
+    if lp is not None and lp < GEM_RULES["min_lp_locked"] and not (sec.get("cex") and (c.get("age_days") or 0) >= 180):
+        return False, "liquidez sin bloquear"
+    if (c.get("dex") or {}).get("boosts") and (c.get("ch7") or 0) > 100:
+        return False, "subida con promoción pagada"
+    bad = {x["label"] for x in sec.get("checks", []) if not x["ok"]}
+    for must in ("Sin autoridad de acuñación", "Sin autoridad de congelación", "Sin acuñación libre del propietario",
+                 "Nadie puede alterar saldos", "El propietario no puede alterar saldos"):
+        if must in bad:
+            return False, must.lower()
+    return True, None
+
+
+def scan_gems(http, coins, excluded, trend_ids, prog, stats):
+    lo, hi = GEM_RANGE
+    raw = {}
+    for page in range(1, 5):
+        prog(f"Shitcoins: monedas con más volumen ({page}/4)", 0.88 + 0.01 * page)
+        data = http.get(f"{CG}/coins/markets?vs_currency=usd&order=volume_desc&per_page=250&page={page}"
+                        f"&sparkline=true&price_change_percentage=1h,24h,7d,30d,1y", ttl=1500) or []
+        for r in data:
+            if r.get("id"):
+                raw.setdefault(r["id"], r)
+    for cid, c in coins.items():
+        raw.setdefault(cid, c["raw"])
+    platforms = fetch_platforms(http)
+    cands = []
+    for cid, r in raw.items():
+        mc = num(r.get("market_cap")) or 0
+        if not (lo <= mc < hi):
+            continue
+        stats["gem_universo"] += 1
+        name = r.get("name") or cid
+        vol = num(r.get("total_volume")) or 0
+        if cid in excluded or EXCLUDE_NAME.search(name) or vol < GEM_RULES["min_vol"]:
+            continue
+        spark = (r.get("sparkline_in_7d") or {}).get("price") or []
+        ts = trend_stats(spark)
+        ch7 = num(r.get("price_change_percentage_7d_in_currency"))
+        if ts is None or ch7 is None or (abs(ch7) < 1.5 and ts["cv"] < 0.006):
+            continue
+        ch, addr = None, None
+        for k in CHAIN_PRIORITY:
+            if (platforms.get(cid) or {}).get(k):
+                ch, addr = k, platforms[cid][k]
+                break
+        if not addr:
+            continue
+        sectors = (coins.get(cid) or {}).get("sectors") or set()
+        cands.append({
+            "id": cid, "symbol": (r.get("symbol") or "").upper(), "name": name, "image": r.get("image"),
+            "rank": r.get("market_cap_rank"), "sector": min(sectors, key=lambda x: SECTOR_INDEX[x]) if sectors else "otros",
+            "bucket": "micro", "price": num(r.get("current_price")), "mcap": mc,
+            "fdv": num(r.get("fully_diluted_valuation")), "volume": vol, "turnover": vol / mc,
+            "ch24": num(r.get("price_change_percentage_24h_in_currency")), "ch7": ch7,
+            "ch30": num(r.get("price_change_percentage_30d_in_currency")),
+            "ch1y": num(r.get("price_change_percentage_1y_in_currency")),
+            "ath": num(r.get("ath")), "ath_dd": num(r.get("ath_change_percentage")), "ath_date": r.get("ath_date"),
+            "trend": ts, "spark": downsample(spark), "trending": cid in trend_ids,
+            "contract": {"chain": ch, "address": addr},
+            "fdv_ratio": (num(r.get("fully_diluted_valuation")) or 0) / mc if r.get("fully_diluted_valuation") else None,
+        })
+    stats["gem_liquidas"] = len(cands)
+    if not cands:
+        return [], []
+    R7, R30 = Ranker([c["ch7"] for c in cands]), Ranker([c["ch30"] for c in cands])
+    for c in cands:
+        t = c["turnover"]
+        turn = clamp(100 - abs(math.log10(max(t, 1e-4)) - math.log10(0.6)) * 70)
+        c["pre"] = (0.35 * R7(c["ch7"]) + 0.2 * (R30(c["ch30"]) if c["ch30"] is not None else 50) + 0.25 * turn
+                    + 0.2 * (50 + 50 * c["trend"]["r2"] * (1 if c["trend"]["slope7"] > 0 else -1)))
+    pool = sorted(cands, key=lambda c: -c["pre"])[:150]
+
+    prog(f"Shitcoins: liquidez on-chain de {len(pool)} candidatas", 0.93)
+    by_chain = defaultdict(list)
+    for c in pool:
+        by_chain[CHAINS[c["contract"]["chain"]][1]].append(c["contract"]["address"])
+    dex = {}
+    for chain, addrs in by_chain.items():
+        dex[chain] = fetch_dex_batch(http, chain, addrs)
+    rejected = Counter()
+    alive = []
+    now_ms = time.time() * 1000
+    for c in pool:
+        d = gem_dex(dex.get(CHAINS[c["contract"]["chain"]][1], {}).get(c["contract"]["address"].lower(), []),
+                    c["contract"]["address"])
+        if not d:
+            rejected["sin pools en DEX"] += 1
+            continue
+        c["dex"] = d
+        c["age_days"] = (now_ms - d["oldest_pool"]) / 86400000 if d.get("oldest_pool") else None
+        if d["liquidity"] < GEM_RULES["min_liq"] or d["liquidity"] < GEM_RULES["min_liq_ratio"] * c["mcap"]:
+            rejected["liquidez insuficiente"] += 1
+        elif c["age_days"] is None or c["age_days"] < GEM_RULES["min_age_days"]:
+            rejected["demasiado joven"] += 1
+        elif d["buys24"] + d["sells24"] < GEM_RULES["min_txns"]:
+            rejected["pocas operaciones"] += 1
+        elif c["ch7"] > GEM_RULES["max_ch7"] or (c["ch24"] or 0) > GEM_RULES["max_ch24"]:
+            rejected["sobrecalentada (ya subió demasiado)"] += 1
+        else:
+            alive.append(c)
+    stats["gem_con_liquidez"] = len(alive)
+
+    to_audit = sorted(alive, key=lambda c: -c["pre"])[:GEM_RULES["audit"]]
+    prog(f"Shitcoins: auditando {len(to_audit)} contratos", 0.95)
+
+    def job(c):
+        return c, audit_contract(http, c["contract"]["chain"], c["contract"]["address"])
+
+    safe = []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for c, sec in ex.map(job, to_audit):
+            c["security"] = sec
+            ok, why = gem_safe(sec, c["contract"]["chain"], c)
+            if ok:
+                safe.append(c)
+            else:
+                rejected[why] += 1
+    stats["gem_auditadas"] = len(to_audit)
+    stats["gem_seguras"] = len(safe)
+    stats["gem_descartes"] = dict(rejected)
+    if not safe:
+        return [], cands
+
+    R_tx = Ranker([c["dex"]["buys24"] + c["dex"]["sells24"] for c in alive])
+    R_h = Ranker([c["security"].get("holders") for c in safe if c["security"].get("holders")])
+    for c in safe:
+        d, sec = c["dex"], c["security"]
+        rot = d["volume24"] / d["liquidity"] if d["liquidity"] else 0
+        rot_s = 100 * rot / 0.5 if rot < 0.5 else (100 if rot <= 6 else clamp(100 - (rot - 6) * 4, 40, 100))
+        bp = clamp(50 + ((d.get("buy_ratio") or 1) - 1) * 200)
+        accel = (d["volume6"] * 4 / d["volume24"]) if d["volume24"] else 1.0
+        c["accel"] = accel
+        tr = (rot_s + R_tx(d["buys24"] + d["sells24"]) + bp) / 3
+        mo = (0.35 * R7(c["ch7"]) + 0.25 * (R30(c["ch30"]) if c["ch30"] is not None else 50)
+              + 0.2 * (50 + 50 * c["trend"]["r2"] * (1 if c["trend"]["slope7"] > 0 else -1))
+              + 0.2 * clamp(50 + (accel - 1) * 50))
+        liq_ratio = d["liquidity"] / c["mcap"]
+        so = mean_present([clamp(liq_ratio / 0.15 * 100), clamp(math.log(max(c["age_days"], 1)) / math.log(365) * 100),
+                           R_h(sec.get("holders")) if sec.get("holders") else None,
+                           sec["lp_locked"] * 100 if sec.get("lp_locked") is not None else None])
+        c["liq_ratio"] = liq_ratio
+        c["scores"] = {"traccion": tr, "momentum": mo, "solidez": so, "seguridad": sec["score"]}
+        final = 0.3 * tr + 0.25 * mo + 0.25 * so + 0.2 * sec["score"]
+        final += 3 if (d["websites"] or d["socials"]) else 0
+        final += 3 if c["trending"] else 0
+        final -= 4 if d.get("boosts") else 0
+        c["overheated"] = (c["ch24"] or 0) > 60 or c["ch7"] > 150
+        if c["overheated"]:
+            final *= 0.8
+        c["final"] = clamp(final)
+        a = {"traccion": tr}
+        if c["age_days"] <= 60 and c["ch7"] > 0 and accel >= 1.1 and not c["overheated"]:
+            a["despegue"] = 0.5 * mo + 0.5 * clamp(50 + (accel - 1) * 60)
+        if c["age_days"] >= 120 and c["ch7"] > 0 and (c["ch30"] or 0) > -10:
+            a["superviviente"] = 0.6 * mo + 0.4 * so
+        if liq_ratio >= 0.08 and sec["score"] >= 85:
+            a["solidez"] = 0.6 * so + 0.4 * sec["score"]
+        c["arch"] = {k: clamp(v) for k, v in a.items()}
+
+    # Selección: primero una por motivo, luego por nota; máximo 2 por cadena. Nunca se rellena con
+    # monedas que no pasaron los filtros.
+    picks, used_chain, used_reason = [], Counter(), Counter()
+
+    def ps(c, a):
+        return 0.6 * c["final"] + 0.4 * c["arch"][a]
+
+    def take(c, a):
+        c["archetype"], c["pick_score"] = a, ps(c, a)
+        picks.append(c)
+        used_chain[c["contract"]["chain"]] += 1
+        used_reason[a] += 1
+
+    for a in [g["id"] for g in GEM_REASONS]:
+        opts = [c for c in safe if a in c["arch"] and c not in picks and used_chain[c["contract"]["chain"]] < 2]
+        if opts and len(picks) < GEM_PICKS:
+            best = max(opts, key=lambda c: ps(c, a))
+            if ps(best, a) >= 55:
+                take(best, a)
+    for v, c, a in sorted(((ps(c, a), c, a) for c in safe for a in c["arch"]), key=lambda x: -x[0]):
+        if len(picks) >= GEM_PICKS:
+            break
+        if c not in picks and used_chain[c["contract"]["chain"]] < 2 and used_reason[a] < 2 and v >= 50:
+            take(c, a)
+    picks.sort(key=lambda c: -c["pick_score"])
+    return picks, cands
+
+
+def gem_evidence(c):
+    d, sec = c["dex"], c["security"]
+    out = []
+    tx = d["buys24"] + d["sells24"]
+    out.append(("traccion", f"{es_num(tx, 0)} operaciones en 24 h ({es_num(d['buys24'], 0)} compras y "
+                            f"{es_num(d['sells24'], 0)} ventas) con {fmt_usd(d['volume24'])} de volumen en DEX."))
+    if d["liquidity"]:
+        out.append(("traccion", f"El volumen diario rota {fmt_x(d['volume24'] / d['liquidity'])} su liquidez "
+                                f"({fmt_usd(d['liquidity'])}, el {es_num(c['liq_ratio'] * 100, 1)} % de su capitalización)."))
+    if c.get("accel") and c["accel"] >= 1.1:
+        out.append(("despegue", f"El volumen de las últimas 6 h va a un ritmo {fmt_x(c['accel'])} superior a la media del día."))
+    out.append(("superviviente" if c["age_days"] >= 120 else "despegue",
+                f"Su primer pool tiene {es_num(c['age_days'], 0)} días: ha superado la fase en la que ocurren la mayoría de los rug pulls."))
+    out.append(("tendencia", f"{fmt_pct(c['ch7'])} en 7 días y {fmt_pct(c['ch30'])} en 30, "
+                             f"tendencia {'limpia' if c['trend']['r2'] > 0.6 else 'irregular'} (R² {es_num(c['trend']['r2'], 2)})."))
+    names = " y ".join(x["name"] for x in sec.get("sources", []) if x["score"] is not None)
+    lock = f", liquidez bloqueada al {es_num(sec['lp_locked'] * 100, 0)} %" if sec.get("lp_locked") else ""
+    out.append(("solidez", f"Contrato limpio en {sec.get('consensus')} auditores ({names}): sin acuñación, sin congelación, "
+                           f"impuestos ≤ 1 %{lock}."))
+    if sec.get("holders"):
+        out.append(("solidez", f"{es_num(sec['holders'], 0)} holders; el top 10 sin etiquetar tiene el "
+                               f"{es_num((sec.get('top10') or 0) * 100, 0)} %."))
+    if d["websites"] or d["socials"]:
+        out.append(("solidez", "Web y redes sociales reclamadas en DexScreener."))
+    if c["trending"]:
+        out.append(("traccion", "En tendencia hoy en CoinGecko."))
+    first = [t for k, t in out if k == c["archetype"]]
+    rest = [t for k, t in out if k != c["archetype"]]
+    return (first + rest)[:7]
+
+
+def gem_risks(c):
+    d, sec = c["dex"], c["security"]
+    out = [("alto", "Micro-cap: puede perder la mayor parte de su valor en horas. Solo dinero que puedas perder entero.")]
+    if c["overheated"]:
+        out.append(("alto", f"Sobrecalentado: {fmt_pct(c['ch24'])} en 24 h. Entrar ahora es perseguir el precio."))
+    if c["age_days"] < 30:
+        out.append(("alto", f"Muy joven: {es_num(c['age_days'], 0)} días de historia."))
+    if d.get("boosts"):
+        out.append(("medio", "Tiene promoción pagada activa en DexScreener: parte del interés puede ser comprado."))
+    if not (d["websites"] or d["socials"]):
+        out.append(("medio", "Sin web ni redes reclamadas en DexScreener: equipo anónimo o poco activo."))
+    if (sec.get("top10") or 0) > 0.2:
+        out.append(("medio", f"El top 10 sin etiquetar concentra el {es_num(sec['top10'] * 100, 0)} %: un par de ventas grandes mueven el precio."))
+    if sec.get("lp_locked") is not None and sec["lp_locked"] < 0.5:
+        out.append(("medio", f"Solo el {es_num(sec['lp_locked'] * 100, 0)} % de la liquidez está bloqueada: podría retirarse."))
+    if c["liq_ratio"] < 0.06:
+        out.append(("medio", f"Liquidez justa para su tamaño ({es_num(c['liq_ratio'] * 100, 1)} % de la capitalización)."))
+    if c["trend"]["vol_daily"] and c["trend"]["vol_daily"] > 0.1:
+        out.append(("medio", f"Oscilación diaria típica del {es_num(c['trend']['vol_daily'] * 100, 0)} %."))
+    if c["fdv_ratio"] and c["fdv_ratio"] > 1.5:
+        out.append(("medio", f"FDV {fmt_x(c['fdv_ratio'])} la capitalización: hay suministro por desbloquear."))
+    return out[:7]
+
+
+def pack_gem(c):
+    d = c["dex"]
+    links = {"coingecko": f"https://www.coingecko.com/es/monedas/{c['id']}",
+             "web": d["websites"][0] if d["websites"] else None,
+             "x": next((x["url"] for x in d["socials"] if x.get("type") in ("twitter", "x")), None)}
+    return {
+        **{k: c.get(k) for k in ("id", "symbol", "name", "image", "sector", "bucket", "rank", "price", "mcap", "fdv",
+                                 "volume", "turnover", "ch24", "ch7", "ch30", "ch1y", "ath", "ath_dd", "ath_date",
+                                 "trending", "overheated", "contract", "archetype", "fdv_ratio")},
+        "score": round(c["final"], 1), "pick_score": round(c["pick_score"], 1), "gem": True,
+        "age_days": round(c["age_days"], 1), "liq_ratio": c["liq_ratio"], "accel": c.get("accel"),
+        "arch": {k: round(v, 1) for k, v in c["arch"].items()},
+        "scores": {k: round(v, 1) if v is not None else None for k, v in c["scores"].items()},
+        "coverage": 1.0, "trend": {k: (round(v, 4) if v is not None else None) for k, v in c["trend"].items()},
+        "spark": [round(x, 12) for x in c["spark"]], "security": c["security"], "dex": d, "links": links,
+        "evidence": gem_evidence(c), "risks": [{"level": lv, "text": t} for lv, t in gem_risks(c)],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Seguimiento de aciertos
 # ---------------------------------------------------------------------------
 
@@ -1223,6 +1559,8 @@ def compute_tracking(history, now_prices, btc_now, now):
         perf = cohort_perf(h, set((h.get("prices") or {}).keys()), now_prices, btc_now)
         if perf:
             age = (now.timestamp() - parse_ts(h["generated_at"])) / 86400
+            gp = cohort_perf({**h, "picks": h["gems"]}, set(), now_prices, btc_now) if h.get("gems") else None
+            perf["gems"] = {"n": gp["n"], "avg": gp["avg"], "best": gp["best"], "worst": gp["worst"]} if gp else None
             cohorts.append({"date": h["date"], "age_days": round(age, 2), **perf})
     horizons = {}
     for H in HORIZONS:
@@ -1433,16 +1771,26 @@ def run_scan(use_cache=True, progress=None):
 
     radar = sorted(recs, key=lambda r: -(r.get("final", r["pre"])))
 
+    try:
+        gems, gem_pool = scan_gems(http, coins, excluded, trend_ids, prog, stats)
+    except Exception as e:  # noqa: BLE001 — la zona shitcoin nunca debe tumbar el escaneo principal
+        log(f"Zona shitcoin: error {type(e).__name__}: {e}")
+        gems, gem_pool = [], []
+    log(f"Zona shitcoin: {len(gems)} joyas de {stats.get('gem_universo', 0)} micro-caps")
+
     # Seguimiento de aciertos: una cohorte por día (la primera selección del día UTC).
     prog("Seguimiento de selecciones anteriores", 0.97)
     history = load_history()
     now_prices = {cid: num(c["raw"].get("current_price")) for cid, c in coins.items()
                   if num(c["raw"].get("current_price"))}
-    tracked = {p["id"] for p in picks}
+    for c in gem_pool:
+        if c.get("price"):
+            now_prices.setdefault(c["id"], c["price"])
+    tracked = {p["id"] for p in picks} | {g["id"] for g in gems}
     cutoff = time.time() - TRACK_DAYS * 86400
     for h in history:
         if parse_ts(h["generated_at"]) >= cutoff:
-            tracked |= {p["id"] for p in h["picks"]}
+            tracked |= {p["id"] for p in h["picks"]} | {g["id"] for g in h.get("gems", [])}
     missing = sorted(i for i in tracked if i not in now_prices)
     for i in range(0, len(missing), 200):
         sp = http.get(f"{CG}/simple/price?ids={','.join(missing[i:i + 200])}&vs_currencies=usd", ttl=600) or {}
@@ -1458,6 +1806,8 @@ def run_scan(use_cache=True, progress=None):
             "picks": [{"id": r["id"], "symbol": r["symbol"], "bucket": r["bucket"], "sector": r["sector"],
                        "archetype": r["archetype"], "score": round(r["final"], 1), "price": r["price"]}
                       for r in picks],
+            "gems": [{"id": g["id"], "symbol": g["symbol"], "archetype": g["archetype"],
+                      "score": round(g["final"], 1), "price": g["price"]} for g in gems],
             "prices": {cid: float(f"{now_prices[cid]:.6g}") for cid in sorted({r["id"] for r in recs} | tracked)
                        if cid in now_prices},
         }
@@ -1474,11 +1824,13 @@ def run_scan(use_cache=True, progress=None):
         "config": {"buckets": BUCKETS, "sectors": [{"id": s["id"], "label": s["label"]} for s in SECTORS],
                    "archetypes": ARCHETYPES, "weights": WEIGHTS, "max_per_sector": MAX_PER_SECTOR,
                    "max_per_archetype": MAX_PER_ARCHETYPE, "missing_value": MISSING_DEFAULT,
-                   "horizons": list(HORIZONS)},
+                   "horizons": list(HORIZONS), "gem_reasons": GEM_REASONS, "gem_rules": GEM_RULES,
+                   "gem_range": list(GEM_RANGE)},
         "stats": dict(stats) | {"api_calls": dict(http.calls), "api_errors": dict(http.errors)},
         "sector_stats": sector_stats,
         "picks": [pack(r, True) for r in picks],
         "tracking": tracking,
+        "gems": [pack_gem(g) for g in gems],
         "radar": [pack(r) for r in radar],
     }
     os.makedirs(DATA_DIR, exist_ok=True)

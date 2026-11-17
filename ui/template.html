@@ -327,6 +327,16 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
 .src-top a { font-size: 12px; }
 .src ul { margin: 0; padding-left: 16px; font-size: 12.5px; color: var(--ink-2); }
 .src.crit { border-color: var(--bad); }
+/* shitcoin zone */
+.hazard { height: 10px; border-radius: 5px; margin-bottom: 16px; opacity: .85;
+  background: repeating-linear-gradient(-45deg, var(--warn) 0 12px, transparent 12px 24px); border: 1px solid var(--warn); }
+.gem-funnel { display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; margin-bottom: 14px; font-size: 13px; color: var(--ink-2); }
+.gem-funnel b { font-family: var(--font-mono); font-weight: 600; color: var(--ink); }
+.gem-funnel .arrow { color: var(--muted); margin: 0 4px; }
+.gem-funnel .last b { color: var(--warn); }
+.gem-why { font-size: 12.5px; color: var(--muted); margin: -6px 0 16px; }
+.flag.risk { background: var(--warn); color: var(--surface); font-weight: 600; }
+
 /* tracking */
 .horizons { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; margin-bottom: 16px; }
 .hz { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 6px; }
@@ -403,6 +413,19 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
     </div>
     <div class="alerts" id="alerts" hidden></div>
     <div id="picks"></div>
+  </section>
+
+  <section id="shitcoins" aria-labelledby="h-shit">
+    <div class="hazard" aria-hidden="true"></div>
+    <div class="sec-head">
+      <div>
+        <h2 id="h-shit">Zona shitcoin</h2>
+        <p id="gem-intro"></p>
+      </div>
+    </div>
+    <div class="gem-funnel num" id="gem-funnel"></div>
+    <p class="gem-why" id="gem-why"></p>
+    <div id="gems"></div>
   </section>
 
   <section id="seguimiento" aria-labelledby="h-seg">
@@ -517,6 +540,12 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
   const SCORE_LABEL = { momentum: "Momentum", valor: "Valoración", fundamentales: "Fundamentales", liquidez: "Liquidez", tokenomics: "Tokenomics", atencion: "Atención", seguridad: "Seguridad" };
   const SEC_LABEL = { limpio: "Contrato limpio", precaucion: "Precaución", riesgo: "Riesgo", nativo: "Activo nativo", sin_datos: "Sin auditar" };
   const PICK_IDS = new Set(S ? S.picks.map((p) => p.id) : []);
+  const GEMS = (S && S.gems) || [];
+  if (S && S.config.gem_reasons) S.config.gem_reasons.forEach((a) => (ARCH[a.id] = a));
+  BLABEL.micro = "Micro cap";
+  SECT.otros = "Sin sector";
+  const GEM_SCORE_LABEL = { traccion: "Tracción", momentum: "Momentum", solidez: "Solidez", seguridad: "Seguridad" };
+  const CHAIN_LABEL = { ethereum: "Ethereum", base: "Base", "binance-smart-chain": "BNB Chain", "arbitrum-one": "Arbitrum", solana: "Solana", "polygon-pos": "Polygon", avalanche: "Avalanche", "optimistic-ethereum": "Optimism" };
 
   // ---- icons ----
   const ICON = {
@@ -659,21 +688,22 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
     if (p.overheated) flags.push('<span class="flag hot">SOBRECALENTADO</span>');
     if (p.fdv_ratio && p.fdv_ratio > 2) flags.push(`<span class="flag">FDV ${esc(xr(p.fdv_ratio))}</span>`);
     const third = p.mcap_tvl && p.tvl && !p.tvl_skewed ? ["Cap/TVL", xr(p.mcap_tvl)] : p.rev_yield ? ["Rend. ingresos", NF(1).format(p.rev_yield) + " %"] : ["FDV/Cap", xr(p.fdv_ratio)];
+    const kv = p.gem
+      ? [["Capitalización", usd(p.mcap)], ["Liquidez DEX", usd(p.dex && p.dex.liquidity)], ["Edad del pool", INT.format(p.age_days) + " días"]]
+      : [["Capitalización", usd(p.mcap)], ["Volumen/Cap", p.turnover == null ? "—" : NF(0).format(p.turnover * 100) + " %"], third];
+    if (p.gem) flags.unshift('<span class="flag risk">ALTO RIESGO</span>');
+    const second = p.gem ? (CHAIN_LABEL[p.contract && p.contract.chain] || "") : SECT[p.sector];
     return `<article class="card" tabindex="0" role="button" data-open="${esc(p.id)}" aria-label="${esc(p.name)}: ver detalle">
       <div class="card-top">${logoHTML(p)}
         <div class="id"><div class="sym">${esc(p.symbol)}<small>#${p.rank == null ? "—" : INT.format(p.rank)}</small></div><div class="name">${esc(p.name)}</div></div>
         <div class="score" title="Nota del escáner">${ring(p.score)}<b>${INT.format(p.score)}</b></div>
       </div>
-      <div class="tags"><span class="tag motive">${esc(ARCH[p.archetype] ? ARCH[p.archetype].label : p.archetype)}</span><span class="tag">${esc(SECT[p.sector])}</span></div>
+      <div class="tags"><span class="tag motive">${esc(ARCH[p.archetype] ? ARCH[p.archetype].label : p.archetype)}</span><span class="tag">${esc(second)}</span></div>
       <p class="thesis">${esc((p.evidence || [])[0] || "")}</p>
       <div class="spark-row">${sparkSVG(p.spark, 200, 46)}
         <div class="px"><div class="p" data-live-price="${esc(p.id)}">${price(p.price)}</div><div class="live-since" data-live-since="${esc(p.id)}" hidden></div><div>7 d <span class="${cls(p.ch7)}">${pct(p.ch7)}</span></div><div>30 d <span class="${cls(p.ch30)}">${pct(p.ch30)}</span></div></div>
       </div>
-      <div class="kv">
-        <div><span>Capitalización</span><b class="num">${usd(p.mcap)}</b></div>
-        <div><span>Volumen/Cap</span><b class="num">${p.turnover == null ? "—" : NF(0).format(p.turnover * 100) + " %"}</b></div>
-        <div><span>${third[0]}</span><b class="num">${esc(third[1])}</b></div>
-      </div>
+      <div class="kv">${kv.map(([k, v]) => `<div><span>${esc(k)}</span><b class="num">${esc(v)}</b></div>`).join("")}</div>
       <div class="card-foot">${secPill(p.security)}<div class="flags">${flags.join("")}</div></div>
     </article>`;
   }
@@ -692,21 +722,36 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
     hydrateLogos($("#picks"));
   }
 
+  // ---- shitcoin zone ----
+  function renderGems() {
+    const st = S.stats || {}, R = S.config.gem_rules, rg = S.config.gem_range;
+    if (!R) { $("#shitcoins").hidden = true; return; }
+    $("#gem-intro").textContent = `Hasta ${INT.format(4)} micro-caps (${usd(rg[0])} – ${usd(rg[1])}) de alto riesgo. Para entrar deben superar a la vez todos estos filtros: al menos ${R.min_age_days} días cotizando, liquidez en DEX de ${usd(R.min_liq)} o más y no inferior al ${NF(0).format(R.min_liq_ratio * 100)} % de su capitalización, ${INT.format(R.min_txns)} operaciones al día, contrato limpio en todos los auditores, sin acuñación ni congelación, impuestos de ${NF(0).format(R.max_tax * 100)} % como mucho, el top 10 por debajo del ${NF(0).format(R.max_top10 * 100)} %, al menos el ${NF(0).format((R.min_lp_locked || 0.3) * 100)} % de la liquidez bloqueada (salvo proyectos de más de 6 meses que cotizan en exchanges centralizados) ni subidas de más del ${INT.format(R.max_ch7 || 150)} % en 7 días o inflada con promoción pagada. Si menos de cuatro los superan, se muestran menos.`;
+    const steps = [[st.gem_universo, "micro-caps"], [st.gem_liquidas, "con volumen y contrato"], [st.gem_con_liquidez, "con liquidez, edad y actividad"], [st.gem_auditadas, "auditadas"], [st.gem_seguras, "seguras"], [GEMS.length, GEMS.length === 1 ? "joya" : "joyas"]];
+    $("#gem-funnel").innerHTML = steps.map(([n, t], i) => `<span class="${i === steps.length - 1 ? "last" : ""}"><b>${n == null ? "—" : INT.format(n)}</b> ${esc(t)}</span>`).join('<span class="arrow" aria-hidden="true">→</span>');
+    const why = Object.entries(st.gem_descartes || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} (${INT.format(v)})`).join(", ");
+    $("#gem-why").textContent = why ? "Descartadas en las últimas fases por: " + why + "." : "";
+    $("#gems").innerHTML = GEMS.length
+      ? `<div class="grid">${GEMS.map(cardHTML).join("")}</div>` + (GEMS.length < 4 ? `<p class="note">Solo ${GEMS.length} ${GEMS.length === 1 ? "moneda supera" : "monedas superan"} hoy todos los filtros. No se rellena con monedas que no los cumplen.</p>` : "")
+      : `<div class="empty">Hoy ninguna micro-cap supera todos los filtros. Es mejor no mostrar ninguna que mostrar una mala.</div>`;
+    hydrateLogos($("#gems"));
+  }
+
   // ---- drawer ----
   let lastFocus = null;
   function dl(rows) {
     return `<div class="dl">${rows.filter((r) => r).map(([k, v]) => `<div><span>${esc(k)}</span><b class="num">${v}</b></div>`).join("")}</div>`;
   }
   function openDetail(id) {
-    const p = S.picks.find((x) => x.id === id);
+    const p = S.picks.find((x) => x.id === id) || GEMS.find((x) => x.id === id);
     if (!p) return;
     lastFocus = document.activeElement;
     const sc = p.scores || {};
-    const bars = Object.keys(SCORE_LABEL).map((k) => {
-      const v = sc[k];
+    const bars = Object.keys(p.gem ? GEM_SCORE_LABEL : SCORE_LABEL).map((k) => {
+      const v = sc[k], lab = (p.gem ? GEM_SCORE_LABEL : SCORE_LABEL)[k];
       return v == null
-        ? `<div class="sbar"><span>${SCORE_LABEL[k]}</span><div class="track na"></div><b class="na">sin datos</b></div>`
-        : `<div class="sbar"><span>${SCORE_LABEL[k]}</span><div class="track"><i style="width:${Math.max(2, v)}%"></i></div><b>${INT.format(v)}</b></div>`;
+        ? `<div class="sbar"><span>${lab}</span><div class="track na"></div><b class="na">sin datos</b></div>`
+        : `<div class="sbar"><span>${lab}</span><div class="track"><i style="width:${Math.max(2, v)}%"></i></div><b>${INT.format(v)}</b></div>`;
     }).join("");
     const arch = Object.entries(p.arch || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
       `<span class="${k === p.archetype ? "main" : ""}">${esc(ARCH[k] ? ARCH[k].label : k)}<b>${INT.format(v)}</b></span>`).join("");
@@ -736,7 +781,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
     $("#drawer").innerHTML = `
       <div class="d-head">${logoHTML(p, 46)}
         <div class="id"><div class="sym" id="d-title">${esc(p.symbol)}<small>${esc(p.name)}</small></div>
-          <div class="tags" style="margin-top:4px"><span class="tag motive">${esc(ARCH[p.archetype].label)}</span><span class="tag">${esc(SECT[p.sector])}</span><span class="tag">${esc(BLABEL[p.bucket])}</span></div></div>
+          <div class="tags" style="margin-top:4px"><span class="tag motive">${esc(ARCH[p.archetype].label)}</span><span class="tag">${esc(p.gem ? (CHAIN_LABEL[p.contract && p.contract.chain] || "") : SECT[p.sector])}</span><span class="tag">${esc(BLABEL[p.bucket])}</span>${p.gem ? '<span class="flag risk">ALTO RIESGO</span>' : ""}</div></div>
         <div class="score">${ring(p.score)}<b>${INT.format(p.score)}</b></div>
         <button class="close" type="button" id="d-close" aria-label="Cerrar detalle">${ICON.close}</button>
       </div>
@@ -757,7 +802,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
           ["En circulación", p.circ_ratio == null ? "—" : NF(0).format(p.circ_ratio * 100) + " %"],
           ["Volatilidad diaria", t.vol_daily == null ? "—" : NF(1).format(t.vol_daily * 100) + " %"], ["Limpieza de tendencia (R², 7 d)", t.r2 == null ? "—" : NF(2).format(t.r2)],
         ])}</div>
-        <div class="d-sec"><h4>Fundamentales on-chain</h4>${p.tvl || p.fees30 || p.rev30 ? dl([
+        <div class="d-sec" ${p.gem ? "hidden" : ""}><h4>Fundamentales on-chain</h4>${p.tvl || p.fees30 || p.rev30 ? dl([
           ["TVL", usd(p.tvl)], ["TVL, cambio 7 d", `<span class="${cls(p.tvl_ch7)}">${pct(p.tvl_ch7)}</span>`],
           ["Capitalización / TVL", xr(p.mcap_tvl) + (p.tvl_skewed ? ' <span style="color:var(--muted);font-family:var(--font-body);font-size:11px">(depósitos de usuarios: no se usa para valorar)</span>' : "")], ["Comisiones 30 d", usd(p.fees30)],
           ["Comisiones vs. mes anterior", `<span class="${cls(p.fees_growth)}">${pct(p.fees_growth, 0)}</span>`], ["Precio / comisiones (anual.)", xr(p.pf)],
@@ -772,7 +817,9 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
             sec.holders ? ["Holders", INT.format(sec.holders)] : null,
             sec.top10 != null ? ["Top 10 carteras sin etiquetar", NF(1).format(sec.top10 * 100) + " %"] : null,
             sec.cex && sec.cex.length ? ["Cotiza en", esc(sec.cex.slice(0, 5).join(", "))] : null,
-            dex ? ["Liquidez en DEX", usd(dex.liquidity)] : null,
+            dex ? ["Liquidez en DEX", usd(dex.liquidity) + (p.liq_ratio ? ` <span style="color:var(--muted)">(${NF(1).format(p.liq_ratio * 100)} % de la cap.)</span>` : "")] : null,
+            sec.lp_locked != null ? ["Liquidez bloqueada", NF(0).format(sec.lp_locked * 100) + " %"] : null,
+            dex && dex.volume24 ? ["Volumen DEX 24 h", usd(dex.volume24)] : null,
             dex ? ["Pools activos", INT.format(dex.pools)] : null,
             dex ? ["Compras / ventas 24 h", `${INT.format(dex.buys24)} / ${INT.format(dex.sells24)}`] : null,
             ageDays != null ? ["Primer pool", `hace ${INT.format(ageDays)} días`] : null,
@@ -921,6 +968,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
       `Tramos: ${esc(b)}.`,
       `Se excluyen stablecoins, tokens envueltos, puenteados, de staking líquido, de exchanges y activos tokenizados (${INT.format(st.excluidas_no_proyecto || 0)} en este escaneo), además de ${INT.format(st.excluidas_liquidez || 0)} por volumen insuficiente.`,
       `Seguridad por consenso: GoPlus revisa las banderas del contrato (honeypot, acuñación, tasas, propietario oculto, proxys, listas negras, concentración); Honeypot.is simula una compra y una venta reales en Ethereum, BNB Chain y Base; RugCheck revisa los tokens de Solana. La nota combina GoPlus (60 %) y el segundo auditor (40 %). Un fallo crítico en cualquiera descarta la moneda (${INT.format(st.descartados_seguridad || 0)} descartadas en este escaneo, ${INT.format(st.auditorias_cruzadas || 0)} contratos con doble auditoría y ${INT.format(st.discrepancias || 0)} discrepancias).`,
+      `Zona shitcoin: micro-caps de ${usd((S.config.gem_range || [0])[0])} a ${usd((S.config.gem_range || [0, 0])[1])} entre las 1.000 monedas con más volumen de CoinGecko. Puntúan por tracción (operaciones, rotación de la liquidez, presión compradora), momentum, solidez (liquidez respecto a la capitalización, edad, holders, liquidez bloqueada) y seguridad. Máximo dos por cadena. Se miden aparte en el seguimiento.`,
       `Selección: primero el mejor representante de cada motivo, luego relleno por nota. Máximo ${S.config.max_per_sector} por sector y ${S.config.max_per_archetype || 2} por motivo; solo se relajan si un tramo no tiene candidatos suficientes. Se descartan también ${INT.format(st.descartados_liquidez_onchain || 0)} monedas con liquidez en DEX ridícula para su tamaño y sin exchange centralizado conocido.`,
       `Fuentes: CoinGecko (mercado, sectores, tendencias, seguidores), DefiLlama (TVL, comisiones, ingresos), GoPlus, Honeypot.is y RugCheck (contratos) y DexScreener (liquidez en DEX). Todas públicas y enlazadas en el detalle de cada moneda.`,
       `Actualización: la selección se recalcula cuando pulsas «Re-escanear» (GitHub Actions, 5–8 minutos; fichas y auditorías se reutilizan 24 h). Los precios y la liquidez de las 16 se refrescan en esta página cada 1–2 minutos y generan alertas si caen más de un 15 % o se retira liquidez.`,
@@ -993,7 +1041,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
   }
   function applyLive() {
     const alerts = [];
-    S.picks.forEach((p) => {
+    S.picks.concat(GEMS).forEach((p) => {
       const lv = LIVE.prices[p.id];
       if (lv && lv.usd && p.price) {
         const since = (lv.usd / p.price - 1) * 100;
@@ -1007,7 +1055,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
       }
       const lq = LIVE.liq[p.id];
       if (lq != null && p.dex && p.dex.liquidity > 0 && lq < p.dex.liquidity * 0.6) {
-        alerts.push({ id: p.id, cls: "bad", html: `${esc(p.symbol)}: liquidez en DEX <b>${pct((lq / p.dex.liquidity - 1) * 100, 0)}</b> (${usd(lq)})` });
+        alerts.push({ id: p.id, cls: "bad", html: `${esc(p.symbol)}: liquidez en DEX <b>${pct((lq / p.dex.liquidity - 1) * 100, 0)}</b> (${usd(lq)})${p.gem ? " · posible rug" : ""}` });
       }
     });
     const box = $("#alerts");
@@ -1017,7 +1065,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
   }
   function startLive() {
     if (!window.fetch || !/^https?:$/.test(location.protocol) && location.protocol !== "file:") return;
-    const ids = S.picks.map((p) => p.id).concat(["bitcoin"]).map(encodeURIComponent).join(",");
+    const ids = S.picks.concat(GEMS).map((p) => p.id).concat(["bitcoin"]).map(encodeURIComponent).join(",");
     const tick = () => fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`, { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((d) => {
@@ -1028,7 +1076,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
       .finally(() => setTimeout(tick, 60000));
     tick();
     const byChain = {};
-    S.picks.forEach((p) => { if (p.contract && p.dex && p.dex.chain) (byChain[p.dex.chain] = byChain[p.dex.chain] || []).push(p); });
+    S.picks.concat(GEMS).forEach((p) => { if (p.contract && p.dex && p.dex.chain) (byChain[p.dex.chain] = byChain[p.dex.chain] || []).push(p); });
     const liq = () => Promise.all(Object.entries(byChain).map(([ch, ps]) =>
       fetch(`https://api.dexscreener.com/tokens/v1/${encodeURIComponent(ch)}/${ps.map((p) => encodeURIComponent(p.contract.address)).join(",")}`)
         .then((r) => (r.ok ? r.json() : []))
@@ -1060,11 +1108,12 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
         <div class="sub">Batieron a BTC en ${INT.format(e.beat_btc_cohorts)} de ${INT.format(e.cohorts)} cohortes · ${e.hit == null ? "—" : NF(0).format(e.hit) + " %"} de las monedas</div></div>`;
     }).join("");
     const rows = T.cohorts || [];
-    let h = `<thead><tr><th scope="col">Cohorte</th><th class="r" scope="col">Antigüedad</th><th class="r" scope="col">Selecciones</th><th class="r" scope="col">BTC</th><th class="r" scope="col">Universo</th><th class="r" scope="col">Exceso vs BTC</th><th class="r" scope="col">Baten a BTC</th><th scope="col">Mejor · peor</th></tr></thead><tbody>`;
+    let h = `<thead><tr><th scope="col">Cohorte</th><th class="r" scope="col">Antigüedad</th><th class="r" scope="col">Selecciones</th><th class="r" scope="col">BTC</th><th class="r" scope="col">Universo</th><th class="r" scope="col">Exceso vs BTC</th><th class="r" scope="col">Baten a BTC</th><th class="r" scope="col">Shitcoins</th><th scope="col">Mejor · peor</th></tr></thead><tbody>`;
     rows.forEach((c) => {
       const age = c.age_days < 1 ? `${INT.format(c.age_days * 24)} h` : `${INT.format(c.age_days)} d`;
       h += `<tr><td>${esc(fday(c.date))}</td><td class="r">${age}</td><td class="r ${cls(c.avg)}">${pct(c.avg)}</td><td class="r ${cls(c.btc)}">${pct(c.btc)}</td><td class="r ${cls(c.universe)}">${pct(c.universe)}</td>
         <td class="r ${cls(c.excess)}">${c.excess == null ? "—" : pct(c.excess).replace(" %", " pts")}</td><td class="r">${c.hit == null ? "—" : NF(0).format(c.hit) + " %"}</td>
+        <td class="r ${c.gems ? cls(c.gems.avg) : ""}">${c.gems ? pct(c.gems.avg) : "—"}</td>
         <td class="best">${esc(c.best.symbol)} <span class="${cls(c.best.ret)}">${pct(c.best.ret, 0)}</span> · ${esc(c.worst.symbol)} <span class="${cls(c.worst.ret)}">${pct(c.worst.ret, 0)}</span></td></tr>`;
     });
     $("#cohorts").innerHTML = h + "</tbody>";
@@ -1085,6 +1134,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
   renderMap();
   initRadar();
   renderRadar();
+  renderGems();
   renderTracking();
   renderMethod();
   updateAge();
