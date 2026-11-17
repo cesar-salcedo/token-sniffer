@@ -40,7 +40,7 @@ import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(ROOT, ".cache")
@@ -52,6 +52,11 @@ CG = "https://api.coingecko.com/api/v3"
 LLAMA = "https://api.llama.fi"
 GOPLUS = "https://api.gopluslabs.io/api/v1"
 DEXS = "https://api.dexscreener.com"
+HONEYPOT = "https://api.honeypot.is/v2"
+RUGCHECK = "https://api.rugcheck.xyz/v1"
+HISTORY_DIR = os.path.join(DATA_DIR, "history")
+TRACK_DAYS = 120          # días durante los que se siguen los precios de cada selección
+HORIZONS = (7, 30, 90)    # horizontes de evaluación de aciertos
 
 # ---------------------------------------------------------------------------
 # Configuración
@@ -139,6 +144,7 @@ CHAINS = {
     "optimistic-ethereum": ("10", "optimism"),
 }
 CHAIN_PRIORITY = list(CHAINS.keys())
+HONEYPOT_CHAINS = {"1": "ethereum", "56": "bsc", "8453": "base"}  # cadenas que Honeypot.is simula
 
 LOG_LOCK = threading.Lock()
 STATUS_PATH = os.path.join(DATA_DIR, "status.json")
@@ -163,8 +169,8 @@ def set_status(stage: str, progress: float, running: bool = True, error: str | N
 # ---------------------------------------------------------------------------
 
 class Http:
-    MIN_INTERVAL = {"api.coingecko.com": 2.6, "api.gopluslabs.io": 1.2,
-                    "api.dexscreener.com": 0.35, "api.llama.fi": 0.2}
+    MIN_INTERVAL = {"api.coingecko.com": 2.6, "api.gopluslabs.io": 1.2, "api.honeypot.is": 1.0,
+                    "api.rugcheck.xyz": 1.2, "api.dexscreener.com": 0.35, "api.llama.fi": 0.2}
 
     def __init__(self, use_cache: bool = True):
         self.use_cache = use_cache
@@ -499,19 +505,30 @@ def fetch_defillama(http):
 def fetch_detail(http, cid):
     url = (f"{CG}/coins/{urllib.parse.quote(cid)}?localization=false&tickers=false&market_data=false"
            f"&community_data=false&developer_data=false&sparkline=false")
-    return http.get(url, ttl=12 * 3600)
+    return http.get(url, ttl=24 * 3600)
 
 
 def fetch_security(http, chain_key, address):
     gp, _ = CHAINS[chain_key]
     if gp == "solana":
-        data = http.get(f"{GOPLUS}/solana/token_security?contract_addresses={address}", ttl=12 * 3600)
+        data = http.get(f"{GOPLUS}/solana/token_security?contract_addresses={address}", ttl=24 * 3600)
     else:
-        data = http.get(f"{GOPLUS}/token_security/{gp}?contract_addresses={address.lower()}", ttl=12 * 3600)
+        data = http.get(f"{GOPLUS}/token_security/{gp}?contract_addresses={address.lower()}", ttl=24 * 3600)
     if not data or not isinstance(data.get("result"), dict) or not data["result"]:
         return None
     res = data["result"]
     return res.get(address) or res.get(address.lower()) or next(iter(res.values()))
+
+
+def fetch_honeypot(http, chain_key, address):
+    gp, _ = CHAINS[chain_key]
+    if gp not in HONEYPOT_CHAINS:
+        return None
+    return http.get(f"{HONEYPOT}/IsHoneypot?address={address}&chainID={gp}", ttl=24 * 3600)
+
+
+def fetch_rugcheck(http, mint):
+    return http.get(f"{RUGCHECK}/tokens/{mint}/report/summary", ttl=24 * 3600)
 
 
 def fetch_dex_batch(http, dex_chain, addresses):
@@ -830,6 +847,94 @@ def assess_solana(sec):
     return clamp(score), critical, checks, extra
 
 
+HONEYPOT_RISK = {"very_low": 100, "low": 92, "medium": 70, "high": 40, "very_high": 15, "honeypot": 0}
+RUGCHECK_ES = {
+    "Mint Authority still enabled": "Autoridad de acuñación activa",
+    "Freeze Authority still enabled": "Autoridad de congelación activa",
+    "Mutable metadata": "Metadatos modificables",
+    "Low Liquidity": "Liquidez baja",
+    "Low amount of LP Providers": "Pocos proveedores de liquidez",
+    "Large Amount of LP Unlocked": "Gran parte de la liquidez sin bloquear",
+    "Top 10 holders high ownership": "Mucha concentración en el top 10",
+    "Single holder ownership": "Un solo holder concentra mucho",
+    "High ownership": "Alta concentración de propiedad",
+    "Copycat token": "Posible token imitación",
+    "High holder correlation": "Holders sospechosamente correlacionados",
+}
+
+
+def goplus_source(chain_key, address, score, critical, checks):
+    gp, _ = CHAINS[chain_key]
+    return {"name": "GoPlus", "what": "Banderas del contrato", "score": score, "critical": critical,
+            "notes": [c["label"] for c in checks if not c["ok"]],
+            "url": f"https://gopluslabs.io/token-security/{gp}/{address}"}
+
+
+def assess_honeypot(d, chain_key, address):
+    gp, _ = CHAINS[chain_key]
+    s = d.get("summary") or {}
+    risk = str(s.get("risk") or "unknown").lower()
+    is_hp = bool((d.get("honeypotResult") or {}).get("isHoneypot"))
+    sim = d.get("simulationResult") or {}
+    bt, st = num(sim.get("buyTax")), num(sim.get("sellTax"))
+    notes, critical = [], False
+    if d.get("simulationSuccess") and bt is not None and st is not None:
+        notes.append(f"Compra y venta simuladas: impuesto {es_num(bt, 1)} % al comprar, {es_num(st, 1)} % al vender")
+    for f in (s.get("flags") or d.get("flags") or [])[:4]:
+        txt = f.get("description") or f.get("flag") if isinstance(f, dict) else str(f)
+        if txt:
+            notes.append(str(txt))
+    score = HONEYPOT_RISK.get(risk)
+    if is_hp or risk == "honeypot":
+        critical, score = True, 0
+        notes.insert(0, "La simulación no pudo vender: honeypot")
+    if st is not None and st > 10:
+        critical = True
+        score = min(score if score is not None else 100, 30)
+    if not d.get("simulationSuccess") and not is_hp:
+        score = None
+        notes.insert(0, "No se pudo simular la compra y venta (sin pool compatible)")
+    return {"name": "Honeypot.is", "what": "Simulación de compra y venta", "score": score, "critical": critical,
+            "notes": notes, "url": f"https://honeypot.is/{HONEYPOT_CHAINS[gp]}?address={address}"}
+
+
+def assess_rugcheck(d, mint):
+    risks_ = d.get("risks") or []
+    danger = [x for x in risks_ if x.get("level") == "danger"]
+    warn = [x for x in risks_ if x.get("level") == "warn"]
+    score = clamp(100 - 20 * len(danger) - 6 * len(warn))
+    critical = bool(d.get("rugged")) or any(re.search(r"rug|honeypot", x.get("name", ""), re.I) for x in danger)
+    notes = [("Grave: " if x in danger else "") + RUGCHECK_ES.get(x.get("name"), x.get("name", "")) for x in danger + warn]
+    lp = num(d.get("lpLockedPct"))
+    if lp is not None:
+        notes.append(f"Liquidez bloqueada: {es_num(lp * 100 if lp <= 1 else lp, 0)} %")
+    return {"name": "RugCheck", "what": "Riesgos del token en Solana", "score": score, "critical": critical,
+            "notes": notes, "url": f"https://rugcheck.xyz/tokens/{mint}"}
+
+
+def combine_security(sources, checks, extra):
+    """Consenso entre auditores automáticos. Un fallo crítico en cualquiera descarta la moneda."""
+    scored = [x for x in sources if x["score"] is not None]
+    if not scored:
+        return {"level": "sin_datos", "score": 60, "critical": False, "checks": checks, "sources": sources,
+                "consensus": None, "disagree": False, **extra}
+    gp = next((x for x in scored if x["name"] == "GoPlus"), None)
+    others = [x for x in scored if x is not gp]
+    if gp and others:
+        score = 0.6 * gp["score"] + 0.4 * sum(x["score"] for x in others) / len(others)
+    else:
+        score = scored[0]["score"] if len(scored) == 1 else sum(x["score"] for x in scored) / len(scored)
+    critical = any(x["critical"] for x in sources)
+    spread = max(x["score"] for x in scored) - min(x["score"] for x in scored)
+    disagree = len(scored) > 1 and spread > 35
+    ok = sum(1 for x in scored if not x["critical"] and x["score"] >= 75)
+    # «Limpio» exige que todos los auditores con opinión lo vean limpio.
+    level = "riesgo" if critical or score < 50 else (
+        "precaucion" if score < 75 or disagree or ok < len(scored) else "limpio")
+    return {"level": level, "score": clamp(score), "critical": critical, "checks": checks, "sources": sources,
+            "consensus": f"{ok}/{len(scored)}", "disagree": disagree, **extra}
+
+
 def pick_contract(detail):
     platforms = {k: v for k, v in (detail.get("platforms") or {}).items() if k and v}
     home = detail.get("asset_platform_id")
@@ -919,7 +1024,8 @@ def evidence(r, sector_stats, market):
                     f"En DEX hubo {es_num(dex['buy_ratio'], 2)} compras por cada venta en 24 h."))
     sec = r.get("security") or {}
     if sec.get("level") == "limpio":
-        out.append((60, None, "Contrato sin alertas en la auditoría automática de GoPlus."))
+        names = " y ".join(x["name"] for x in sec.get("sources", []) if x["score"] is not None)
+        out.append((60, None, f"Contrato sin alertas graves en {sec.get('consensus')} auditorías automáticas ({names})."))
     return out
 
 
@@ -954,6 +1060,13 @@ def risks(r):
         if not c["ok"]:
             out.append((c.get("sev", "bajo"),
                         f"Contrato: falla «{c['label']}»" + (f" ({c['detail']})" if c.get("detail") else "") + "."))
+    for src in sec.get("sources", []):
+        if src["name"] != "GoPlus" and src["score"] is not None and src["score"] < 75:
+            out.append(("alto" if src["critical"] else "medio",
+                        f"{src['name']}: " + "; ".join(n for n in src["notes"][:3]) + "."))
+    if sec.get("disagree"):
+        vals = ", ".join(f"{x['name']} {int(x['score'])}" for x in sec["sources"] if x["score"] is not None)
+        out.append(("medio", f"Los auditores discrepan ({vals}): revisa el contrato a mano."))
     if sec.get("level") == "sin_datos":
         out.append(("bajo", "Contrato en una cadena que el escáner no audita: revísalo a mano."))
     if r["scores"]["valor"] is None and r["sector"] not in ("meme",):
@@ -1052,6 +1165,92 @@ def select(cands):
 
 
 # ---------------------------------------------------------------------------
+# Seguimiento de aciertos
+# ---------------------------------------------------------------------------
+
+def parse_ts(iso):
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return 0.0
+
+
+def load_history():
+    out = []
+    if not os.path.isdir(HISTORY_DIR):
+        return out
+    for fn in sorted(os.listdir(HISTORY_DIR)):
+        if not re.match(r"^\d{4}-\d{2}-\d{2}\.json$", fn):
+            continue
+        try:
+            with open(os.path.join(HISTORY_DIR, fn)) as f:
+                d = json.load(f)
+            if d.get("picks") and d.get("generated_at"):
+                out.append(d)
+        except (OSError, json.JSONDecodeError):
+            log(f"  historial ilegible: {fn}")
+    return out
+
+
+def cohort_perf(h, prices_then_ids, prices_now, btc_now):
+    """Rendimiento equiponderado de las selecciones de una cohorte frente a BTC y al universo."""
+    rets = []
+    for p in h["picks"]:
+        p0, p1 = num(p.get("price")), prices_now.get(p["id"])
+        if p0 and p1:
+            rets.append({"id": p["id"], "symbol": p["symbol"], "bucket": p.get("bucket"),
+                         "archetype": p.get("archetype"), "ret": (p1 / p0 - 1) * 100})
+    if not rets:
+        return None
+    btc = (btc_now / h["btc_price"] - 1) * 100 if btc_now and h.get("btc_price") else None
+    uni = [(prices_now[i] / v - 1) * 100 for i, v in (h.get("prices") or {}).items()
+           if v and prices_now.get(i) and i in prices_then_ids]
+    avg = sum(x["ret"] for x in rets) / len(rets)
+    return {
+        "n": len(rets), "avg": avg, "median": statistics.median(x["ret"] for x in rets),
+        "btc": btc, "universe": statistics.median(uni) if len(uni) >= 20 else None,
+        "hit": (sum(1 for x in rets if x["ret"] > btc) / len(rets) * 100) if btc is not None else None,
+        "excess": (avg - btc) if btc is not None else None,
+        "best": max(rets, key=lambda x: x["ret"]), "worst": min(rets, key=lambda x: x["ret"]),
+        "picks": sorted(rets, key=lambda x: -x["ret"]),
+    }
+
+
+def compute_tracking(history, now_prices, btc_now, now):
+    by_date = {h["date"]: h for h in history}
+    cohorts = []
+    for h in sorted(history, key=lambda x: x["date"], reverse=True)[:90]:
+        perf = cohort_perf(h, set((h.get("prices") or {}).keys()), now_prices, btc_now)
+        if perf:
+            age = (now.timestamp() - parse_ts(h["generated_at"])) / 86400
+            cohorts.append({"date": h["date"], "age_days": round(age, 2), **perf})
+    horizons = {}
+    for H in HORIZONS:
+        samples = []
+        for h in history:
+            d0 = datetime.fromisoformat(h["date"])
+            for slack in (0, 1, -1, 2):
+                later = by_date.get((d0 + timedelta(days=H + slack)).strftime("%Y-%m-%d"))
+                if later:
+                    pr = {k: v for k, v in (later.get("prices") or {}).items() if v}
+                    perf = cohort_perf(h, set((h.get("prices") or {}).keys()) & set(pr), pr, later.get("btc_price"))
+                    if perf:
+                        samples.append(perf)
+                    break
+        first = min((h["date"] for h in history), default=None)
+        entry = {"cohorts": len(samples),
+                 "first_result": (datetime.fromisoformat(first) + timedelta(days=H)).strftime("%Y-%m-%d") if first else None}
+        if samples:
+            def avg_of(k):
+                v = [x[k] for x in samples if x[k] is not None]
+                return sum(v) / len(v) if v else None
+            entry.update({k: avg_of(k) for k in ("avg", "btc", "universe", "hit", "excess")})
+            entry["beat_btc_cohorts"] = sum(1 for x in samples if (x["excess"] or 0) > 0)
+        horizons[str(H)] = entry
+    return {"cohorts": cohorts, "horizons": horizons, "track_days": TRACK_DAYS}
+
+
+# ---------------------------------------------------------------------------
 # Orquestación
 # ---------------------------------------------------------------------------
 
@@ -1108,20 +1307,28 @@ def run_scan(use_cache=True, progress=None):
             sec_jobs.append(r)
             dex_by_chain[CHAINS[ch][1]].append(addr)
 
-    prog(f"GoPlus: auditando {len(sec_jobs)} contratos", 0.77)
+    prog(f"Seguridad: {len(sec_jobs)} contratos en GoPlus, Honeypot.is y RugCheck", 0.77)
 
     def do_sec(r):
-        return r, fetch_security(http, r["contract"]["chain"], r["contract"]["address"])
+        ch, addr = r["contract"]["chain"], r["contract"]["address"]
+        gp = fetch_security(http, ch, addr)
+        second = fetch_rugcheck(http, addr) if ch == "solana" else fetch_honeypot(http, ch, addr)
+        return r, gp, second
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        for r, sec in ex.map(do_sec, sec_jobs):
-            if not sec:
-                r["security"] = {"level": "sin_datos", "score": 60, "checks": [], "critical": False}
-                continue
-            fn = assess_solana if r["contract"]["chain"] == "solana" else assess_evm
-            score, critical, checks, extra = fn(sec)
-            level = "riesgo" if critical or score < 50 else ("precaucion" if score < 75 else "limpio")
-            r["security"] = {"level": level, "score": score, "critical": critical, "checks": checks, **extra}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for r, gp, second in ex.map(do_sec, sec_jobs):
+            ch, addr = r["contract"]["chain"], r["contract"]["address"]
+            sources, checks, extra = [], [], {}
+            if gp:
+                fn = assess_solana if ch == "solana" else assess_evm
+                score, critical, checks, extra = fn(gp)
+                sources.append(goplus_source(ch, addr, score, critical, checks))
+            if second and isinstance(second, dict):
+                try:
+                    sources.append(assess_rugcheck(second, addr) if ch == "solana" else assess_honeypot(second, ch, addr))
+                except (KeyError, TypeError, ValueError) as e:
+                    log(f"  {r['symbol']}: respuesta de seguridad no interpretable ({e})")
+            r["security"] = combine_security(sources, checks, extra)
 
     prog("DexScreener: liquidez on-chain", 0.86)
     dex_data = {}
@@ -1170,6 +1377,9 @@ def run_scan(use_cache=True, progress=None):
         r["arch"] = archetype_scores(r, R)
 
     stats["auditados"] = sum(1 for r in short if r["security"]["level"] not in ("nativo", "sin_datos"))
+    stats["auditorias_cruzadas"] = sum(1 for r in short if len([x for x in r["security"].get("sources", [])
+                                                               if x["score"] is not None]) >= 2)
+    stats["discrepancias"] = sum(1 for r in short if r["security"].get("disagree"))
     stats["descartados_seguridad"] = sum(1 for r in short if r["security"]["level"] == "riesgo")
     def thin(r):
         # Liquidez en DEX ridícula para su tamaño y sin listado conocido en exchanges centralizados.
@@ -1222,28 +1432,58 @@ def run_scan(use_cache=True, progress=None):
         return base
 
     radar = sorted(recs, key=lambda r: -(r.get("final", r["pre"])))
+
+    # Seguimiento de aciertos: una cohorte por día (la primera selección del día UTC).
+    prog("Seguimiento de selecciones anteriores", 0.97)
+    history = load_history()
+    now_prices = {cid: num(c["raw"].get("current_price")) for cid, c in coins.items()
+                  if num(c["raw"].get("current_price"))}
+    tracked = {p["id"] for p in picks}
+    cutoff = time.time() - TRACK_DAYS * 86400
+    for h in history:
+        if parse_ts(h["generated_at"]) >= cutoff:
+            tracked |= {p["id"] for p in h["picks"]}
+    missing = sorted(i for i in tracked if i not in now_prices)
+    for i in range(0, len(missing), 200):
+        sp = http.get(f"{CG}/simple/price?ids={','.join(missing[i:i + 200])}&vs_currencies=usd", ttl=600) or {}
+        for cid, v in sp.items():
+            if num((v or {}).get("usd")):
+                now_prices[cid] = num(v["usd"])
+    generated = datetime.now(timezone.utc)
+    day = generated.strftime("%Y-%m-%d")
+    if not any(h["date"] == day for h in history):
+        snap = {
+            "date": day, "generated_at": generated.isoformat(timespec="seconds"),
+            "btc_price": market.get("btc_price"),
+            "picks": [{"id": r["id"], "symbol": r["symbol"], "bucket": r["bucket"], "sector": r["sector"],
+                       "archetype": r["archetype"], "score": round(r["final"], 1), "price": r["price"]}
+                      for r in picks],
+            "prices": {cid: float(f"{now_prices[cid]:.6g}") for cid in sorted({r["id"] for r in recs} | tracked)
+                       if cid in now_prices},
+        }
+        os.makedirs(HISTORY_DIR, exist_ok=True)
+        with open(os.path.join(HISTORY_DIR, f"{day}.json"), "w") as f:
+            json.dump(snap, f, ensure_ascii=False, separators=(",", ":"))
+        history.append(snap)
+        log(f"Nueva cohorte diaria guardada: {day}")
+    tracking = compute_tracking(history, now_prices, market.get("btc_price"), generated)
     result = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "duration_s": round(time.time() - t0, 1),
         "market": market,
         "config": {"buckets": BUCKETS, "sectors": [{"id": s["id"], "label": s["label"]} for s in SECTORS],
                    "archetypes": ARCHETYPES, "weights": WEIGHTS, "max_per_sector": MAX_PER_SECTOR,
-                   "max_per_archetype": MAX_PER_ARCHETYPE, "missing_value": MISSING_DEFAULT},
+                   "max_per_archetype": MAX_PER_ARCHETYPE, "missing_value": MISSING_DEFAULT,
+                   "horizons": list(HORIZONS)},
         "stats": dict(stats) | {"api_calls": dict(http.calls), "api_errors": dict(http.errors)},
         "sector_stats": sector_stats,
         "picks": [pack(r, True) for r in picks],
+        "tracking": tracking,
         "radar": [pack(r) for r in radar],
     }
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(os.path.join(DATA_DIR, "scan.json"), "w") as f:
         json.dump(result, f, ensure_ascii=False, default=lambda o: sorted(o) if isinstance(o, set) else None)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    hist = os.path.join(DATA_DIR, "history")
-    os.makedirs(hist, exist_ok=True)
-    with open(os.path.join(hist, f"scan-{stamp}.json"), "w") as f:
-        json.dump({"generated_at": result["generated_at"], "picks": [
-            {k: p[k] for k in ("id", "symbol", "bucket", "sector", "archetype", "score", "price", "mcap")}
-            for p in result["picks"]]}, f, ensure_ascii=False)
     build_ui(result)
     set_status("Listo", 1.0, running=False)
     log(f"Escaneo completo en {result['duration_s']} s · {len(picks)} selecciones")
@@ -1254,10 +1494,24 @@ def run_scan(use_cache=True, progress=None):
 # Interfaz
 # ---------------------------------------------------------------------------
 
+def repo_slug():
+    """owner/repo de GitHub, para el botón «Re-escanear» de la web."""
+    slug = os.environ.get("GITHUB_REPOSITORY")
+    if slug:
+        return slug
+    try:
+        with open(os.path.join(ROOT, ".git", "config")) as f:
+            m = re.search(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?\s", f.read())
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
 def build_ui(result=None):
     if result is None:
         with open(os.path.join(DATA_DIR, "scan.json")) as f:
             result = json.load(f)
+    result.setdefault("config", {})["repo"] = repo_slug()
     with open(TEMPLATE, encoding="utf-8") as f:
         tpl = f.read()
     payload = json.dumps(result, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
@@ -1277,6 +1531,8 @@ def build_ui(result=None):
             open(os.path.join(docs, "index.html"), "w", encoding="utf-8") as dst:
         dst.write(src.read())
     open(os.path.join(docs, ".nojekyll"), "w").close()
+    with open(os.path.join(docs, "scan.json"), "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
     log(f"Interfaz generada en {os.path.join(DIST_DIR, 'index.html')} y docs/index.html")
 
 

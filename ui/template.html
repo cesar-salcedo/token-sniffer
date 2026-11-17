@@ -301,6 +301,41 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
 .d-spark svg { width: 100%; height: 120px; display: block; }
 .d-spark text { fill: var(--muted); font-family: var(--font-mono); font-size: 10px; }
 
+/* live */
+.live { display: inline-flex; align-items: center; gap: 7px; }
+.live i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.live.on i { background: var(--good); box-shadow: 0 0 0 3px var(--good-soft); }
+@media (prefers-reduced-motion: no-preference) { .live.on i { animation: pulse 2s infinite; } }
+@keyframes pulse { 50% { box-shadow: 0 0 0 6px transparent; } }
+.live-since { font-size: 11px; color: var(--muted); }
+.alerts { display: grid; gap: 8px; margin-bottom: 16px; padding: 12px 14px; border-radius: var(--radius);
+  background: var(--warn-soft); border: 1px solid var(--warn); }
+.alerts h3 { font-family: var(--font-body); font-size: 14px; font-weight: 600; color: var(--warn); display: flex; gap: 8px; align-items: center; }
+.alerts h3 svg { width: 16px; height: 16px; }
+.alert-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.alert-chip { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 4px 10px; font-size: 13px; cursor: pointer; }
+.alert-chip b { font-family: var(--font-mono); }
+.alert-chip.bad b { color: var(--down); }
+.alert-chip.good b { color: var(--up); }
+/* security sources */
+.srcs { display: grid; gap: 8px; margin-bottom: 12px; }
+.src { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; }
+.src-top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.src-top b { font-size: 14px; }
+.src-top .what { color: var(--muted); font-size: 12px; }
+.src-top .sc { margin-left: auto; font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+.src-top a { font-size: 12px; }
+.src ul { margin: 0; padding-left: 16px; font-size: 12.5px; color: var(--ink-2); }
+.src.crit { border-color: var(--bad); }
+/* tracking */
+.horizons { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; margin-bottom: 16px; }
+.hz { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 6px; }
+.hz .big { font-family: var(--font-mono); font-size: 24px; font-weight: 600; line-height: 1.2; }
+.hz .sub { font-size: 13px; color: var(--ink-2); }
+.hz .pending { font-size: 13px; color: var(--muted); }
+.cohorts td.best { color: var(--muted); font-size: 12px; }
+.note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+
 @media (max-width: 760px) {
   .pipeline { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .pipe-step:nth-child(3) { border-right: 0; }
@@ -366,7 +401,20 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
       <label class="sel" for="f-sector">Sector <select id="f-sector"></select></label>
       <span class="result-count num" id="result-count"></span>
     </div>
+    <div class="alerts" id="alerts" hidden></div>
     <div id="picks"></div>
+  </section>
+
+  <section id="seguimiento" aria-labelledby="h-seg">
+    <div class="sec-head">
+      <div>
+        <h2 id="h-seg">Seguimiento de aciertos</h2>
+        <p>Cada día se guarda la primera selección como cohorte y se mide cómo rinde, con el mismo peso para las 16 monedas, frente a bitcoin y frente a la mediana del universo. Es la forma de comprobar si los criterios funcionan o no.</p>
+      </div>
+    </div>
+    <div class="horizons" id="horizons"></div>
+    <div class="table-wrap"><table class="radar cohorts" id="cohorts"></table></div>
+    <p class="note" id="track-note"></p>
   </section>
 
   <section id="mapa" aria-labelledby="h-map">
@@ -535,18 +583,22 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
   function secPill(sec) {
     const lv = (sec && sec.level) || "sin_datos";
     const icon = lv === "limpio" ? ICON.ok : lv === "riesgo" ? ICON.bad : lv === "precaucion" ? ICON.warn : ICON.shield;
-    const sc = sec && sec.score != null && lv !== "nativo" && lv !== "sin_datos" ? ` · ${INT.format(sec.score)}` : "";
-    return `<span class="sec-pill lv-${lv}">${icon}${SEC_LABEL[lv]}${sc}</span>`;
+    let extra = "";
+    if (sec && sec.consensus) extra = ` · ${esc(sec.consensus)} auditores`;
+    else if (sec && sec.score != null && lv !== "nativo" && lv !== "sin_datos") extra = ` · ${INT.format(sec.score)}`;
+    const tip = sec && sec.consensus ? ` title="Auditores automáticos sin alertas graves: ${esc(sec.consensus)}"` : "";
+    return `<span class="sec-pill lv-${lv}"${tip}>${icon}${SEC_LABEL[lv]}${extra}</span>`;
   }
 
   // ---- header ----
   function renderHeader() {
     const st = S.stats || {};
     $("#scan-meta").innerHTML =
-      `<div class="meta-item"><span class="label">Escaneo</span><b>${esc(fdate(S.generated_at))}</b></div>` +
+      `<div class="meta-item"><span class="label">Selección calculada</span><b>${esc(fdate(S.generated_at))} <span id="scan-age" style="color:var(--muted)"></span></b></div>` +
       `<div class="meta-item"><span class="label">Duración</span><b>${INT.format(S.duration_s)} s</b></div>` +
-      `<div class="meta-item"><span class="label">Llamadas a APIs</span><b>${INT.format(Object.values(st.api_calls || {}).reduce((a, b) => a + b, 0))}</b></div>` +
-      `<button class="rescan" id="rescan" type="button" hidden>Re-escanear ahora</button>`;
+      `<div class="meta-item"><span class="label">Precios</span><b class="live" id="live-status"><i></i><span>del escaneo</span></b></div>` +
+      `<button class="rescan" id="rescan" type="button" hidden>Re-escanear ahora</button>` +
+      `<a class="rescan" id="rescan-gh" hidden target="_blank" rel="noopener noreferrer" style="text-decoration:none">Re-escanear</a>`;
     const steps = [
       [st.universo, "monedas en los 13 sectores"],
       [st.universo - (st.fuera_de_rango || 0), "entre $15 M y $3.000 M"],
@@ -615,7 +667,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
       <div class="tags"><span class="tag motive">${esc(ARCH[p.archetype] ? ARCH[p.archetype].label : p.archetype)}</span><span class="tag">${esc(SECT[p.sector])}</span></div>
       <p class="thesis">${esc((p.evidence || [])[0] || "")}</p>
       <div class="spark-row">${sparkSVG(p.spark, 200, 46)}
-        <div class="px"><div class="p">${price(p.price)}</div><div>7 d <span class="${cls(p.ch7)}">${pct(p.ch7)}</span></div><div>30 d <span class="${cls(p.ch30)}">${pct(p.ch30)}</span></div></div>
+        <div class="px"><div class="p" data-live-price="${esc(p.id)}">${price(p.price)}</div><div class="live-since" data-live-since="${esc(p.id)}" hidden></div><div>7 d <span class="${cls(p.ch7)}">${pct(p.ch7)}</span></div><div>30 d <span class="${cls(p.ch30)}">${pct(p.ch30)}</span></div></div>
       </div>
       <div class="kv">
         <div><span>Capitalización</span><b class="num">${usd(p.mcap)}</b></div>
@@ -668,6 +720,14 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
     let secBody = "";
     if (sec.level === "nativo") secBody = `<p class="desc">Es el activo nativo de su propia cadena: no hay un contrato de token que auditar. El riesgo está en el protocolo y en la red, que este escáner no evalúa.</p>`;
     else if (sec.level === "sin_datos") secBody = `<p class="desc">El contrato vive en una cadena que GoPlus no cubre en este escáner o no devolvió datos. Revísalo manualmente en un explorador de bloques.</p>`;
+    const srcs = (sec.sources || []).map((x) => {
+      const u = safeUrl(x.url);
+      const sc = x.score == null ? "no concluyente" : INT.format(x.score);
+      const notes = (x.notes || []).slice(0, 5).map((n) => `<li>${esc(n)}</li>`).join("");
+      return `<div class="src ${x.critical ? "crit" : ""}"><div class="src-top"><b>${esc(x.name)}</b><span class="what">${esc(x.what || "")}</span><span class="sc">${x.critical ? "FALLO CRÍTICO" : sc}</span>${u ? `<a href="${u}" target="_blank" rel="noopener noreferrer">Ver informe</a>` : ""}</div>${notes ? `<ul>${notes}</ul>` : `<span class="desc" style="margin:0;font-size:12.5px">Sin alertas.</span>`}</div>`;
+    }).join("");
+    const consensusTxt = sec.consensus ? `<p class="desc" style="margin-bottom:10px">${esc(sec.consensus)} auditores automáticos sin alertas graves${sec.disagree ? ". <b>Discrepan entre sí</b>: conviene revisarlo a mano" : ""}. Un fallo crítico en cualquiera de ellos descarta la moneda.</p>` : "";
+    const lv = LIVE.prices[p.id];
     const contract = p.contract ? `<div class="addr"><span class="label">${esc(p.contract.chain)}</span><code id="addr">${esc(p.contract.address)}</code><button class="copy" type="button" data-copy="${esc(p.contract.address)}">Copiar</button></div>` : "";
     const links = Object.entries(p.links || {}).map(([k, u]) => { const s = safeUrl(u); return s ? `<a href="${s}" target="_blank" rel="noopener noreferrer">${esc({ web: "Web", x: "X / Twitter", coingecko: "CoinGecko", defillama: "DefiLlama" }[k] || k)}</a>` : ""; }).join("") +
       (dex && safeUrl(dex.url) ? `<a href="${safeUrl(dex.url)}" target="_blank" rel="noopener noreferrer">DexScreener</a>` : "");
@@ -688,7 +748,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
           <p class="desc" style="margin:10px 0 0;font-size:12.5px">Cobertura de datos: ${INT.format((p.coverage || 0) * 100)} % del peso total. Motivos en los que también encaja:</p>
           <div class="arch-scores" style="margin-top:8px">${arch}</div></div>
         <div class="d-sec"><h4>Mercado</h4>${dl([
-          ["Precio", price(p.price)], ["Capitalización", usd(p.mcap)], ["FDV", usd(p.fdv)], ["FDV / capitalización", xr(p.fdv_ratio)],
+          ["Precio en el escaneo", price(p.price)], lv ? ["Precio ahora (en vivo)", `${price(lv.usd)} <span class="${cls(lv.usd / p.price - 1)}">${pct((lv.usd / p.price - 1) * 100)}</span>`] : null, ["Capitalización", usd(p.mcap)], ["FDV", usd(p.fdv)], ["FDV / capitalización", xr(p.fdv_ratio)],
           ["Volumen 24 h", usd(p.volume)], ["Volumen / capitalización", p.turnover == null ? "—" : NF(1).format(p.turnover * 100) + " %"],
           ["Cambio 24 h", `<span class="${cls(p.ch24)}">${pct(p.ch24)}</span>`], ["Cambio 7 d", `<span class="${cls(p.ch7)}">${pct(p.ch7)}</span>`],
           ["Cambio 30 d", `<span class="${cls(p.ch30)}">${pct(p.ch30)}</span>`], ["Cambio 1 año", `<span class="${cls(p.ch1y)}">${pct(p.ch1y)}</span>`],
@@ -705,7 +765,8 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
           ["Rendimiento por ingresos", p.rev_yield == null ? "—" : NF(1).format(p.rev_yield) + " % anual"], ["Categoría DefiLlama", esc(p.llama_cat || "—")],
         ]) : `<p class="desc">DefiLlama no registra TVL ni ingresos para este activo. Es habitual en memecoins, tokens de gaming y algunas infraestructuras.</p>`}</div>
         <div class="d-sec"><h4>Contrato y liquidez</h4>
-          <div style="margin-bottom:10px">${secPill(sec)}</div>${secBody}${contract}
+          <div style="margin-bottom:10px">${secPill(sec)}</div>${consensusTxt}${srcs ? `<div class="srcs">${srcs}</div>` : ""}${secBody}${contract}
+          ${checks ? `<h4 style="font-size:13px;margin:12px 0 8px">Comprobaciones de GoPlus</h4>` : ""}
           ${checks ? `<ul class="checks" style="margin-bottom:12px">${checks}</ul>` : ""}
           ${dl([
             sec.holders ? ["Holders", INT.format(sec.holders)] : null,
@@ -859,11 +920,41 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
     $("#filters-list").innerHTML = [
       `Tramos: ${esc(b)}.`,
       `Se excluyen stablecoins, tokens envueltos, puenteados, de staking líquido, de exchanges y activos tokenizados (${INT.format(st.excluidas_no_proyecto || 0)} en este escaneo), además de ${INT.format(st.excluidas_liquidez || 0)} por volumen insuficiente.`,
-      `Seguridad: GoPlus revisa honeypots, acuñación, tasas, propietario oculto, proxys, listas negras y concentración de carteras. Un fallo crítico descarta la moneda (${INT.format(st.descartados_seguridad || 0)} descartadas).`,
+      `Seguridad por consenso: GoPlus revisa las banderas del contrato (honeypot, acuñación, tasas, propietario oculto, proxys, listas negras, concentración); Honeypot.is simula una compra y una venta reales en Ethereum, BNB Chain y Base; RugCheck revisa los tokens de Solana. La nota combina GoPlus (60 %) y el segundo auditor (40 %). Un fallo crítico en cualquiera descarta la moneda (${INT.format(st.descartados_seguridad || 0)} descartadas en este escaneo, ${INT.format(st.auditorias_cruzadas || 0)} contratos con doble auditoría y ${INT.format(st.discrepancias || 0)} discrepancias).`,
       `Selección: primero el mejor representante de cada motivo, luego relleno por nota. Máximo ${S.config.max_per_sector} por sector y ${S.config.max_per_archetype || 2} por motivo; solo se relajan si un tramo no tiene candidatos suficientes. Se descartan también ${INT.format(st.descartados_liquidez_onchain || 0)} monedas con liquidez en DEX ridícula para su tamaño y sin exchange centralizado conocido.`,
-      `Fuentes: CoinGecko (mercado, sectores, tendencias, seguidores), DefiLlama (TVL, comisiones, ingresos), GoPlus (contratos) y DexScreener (liquidez en DEX). Todas públicas.`,
-      `Para actualizar: <code>python3 sniffer.py serve</code> y pulsa «Re-escanear ahora», o <code>python3 sniffer.py</code> para regenerar esta página.`,
+      `Fuentes: CoinGecko (mercado, sectores, tendencias, seguidores), DefiLlama (TVL, comisiones, ingresos), GoPlus, Honeypot.is y RugCheck (contratos) y DexScreener (liquidez en DEX). Todas públicas y enlazadas en el detalle de cada moneda.`,
+      `Actualización: la selección se recalcula cuando pulsas «Re-escanear» (GitHub Actions, 5–8 minutos; fichas y auditorías se reutilizan 24 h). Los precios y la liquidez de las 16 se refrescan en esta página cada 1–2 minutos y generan alertas si caen más de un 15 % o se retira liquidez.`,
+      `Datos en bruto de este escaneo: <a href="scan.json">scan.json</a>. En local: <code>python3 sniffer.py serve</code> y pulsa «Re-escanear ahora».`,
     ].map((t) => `<li>${t}</li>`).join("");
+  }
+
+  // ---- scan age + rescan on GitHub (hosted on GitHub Pages) ----
+  function updateAge() {
+    const el = $("#scan-age");
+    if (!el) return;
+    const m = Math.max(0, Math.round((Date.now() - new Date(S.generated_at).getTime()) / 60000));
+    el.textContent = "· hace " + (m < 60 ? m + " min" : m < 2880 ? Math.round(m / 60) + " h" : Math.round(m / 1440) + " días");
+  }
+  function initGithubRescan() {
+    const slug = /\.github\.io$/.test(location.hostname)
+      ? location.hostname.split(".")[0] + "/" + (location.pathname.split("/")[1] || "")
+      : S.config.repo;
+    if (!slug || !/^[\w.-]+\/[\w.-]+$/.test(slug)) return;
+    const a = $("#rescan-gh");
+    a.href = `https://github.com/${slug}/actions/workflows/escaneo.yml`;
+    a.title = "Abre GitHub: pulsa «Run workflow». En 5–8 minutos esta página detecta el escaneo nuevo.";
+    a.hidden = false;
+    if (!/\.github\.io$/.test(location.hostname)) return;
+    // Avisa cuando se publique un escaneo más reciente que el que se está viendo.
+    const check = () => fetch("scan.json?t=" + Date.now(), { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((d) => {
+      if (d && d.generated_at && new Date(d.generated_at) > new Date(S.generated_at)) {
+        $("#scan-progress").hidden = false;
+        $("#scan-stage").innerHTML = `Hay un escaneo nuevo (${esc(fdate(d.generated_at))}). <button class="copy" type="button" id="reload-scan">Actualizar</button>`;
+        $("#reload-scan").addEventListener("click", () => location.reload());
+        $(".scan-progress .bar").hidden = true;
+      } else setTimeout(check, 60000);
+    }).catch(() => setTimeout(check, 120000));
+    setTimeout(check, 60000);
   }
 
   // ---- local server: rescan ----
@@ -873,6 +964,7 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
       if (!st || typeof st.running !== "boolean") return;
       const btn = $("#rescan");
       btn.hidden = false;
+      $("#rescan-gh").hidden = true;
       const poll = () => fetch("api/status", { cache: "no-store" }).then((r) => r.json()).then((s) => {
         $("#scan-progress").hidden = false;
         $("#scan-stage").textContent = s.stage || "Escaneando…";
@@ -889,6 +981,98 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
     }).catch(() => {});
   }
 
+  // ---- live prices (browser → CoinGecko / DexScreener). Hosted pages that block fetch keep scan prices.
+  const LIVE = { prices: {}, liq: {}, at: null, ok: false };
+  function setLiveStatus() {
+    const el = $("#live-status");
+    if (!el) return;
+    if (!LIVE.ok) { el.classList.remove("on"); el.lastChild.textContent = "del escaneo"; return; }
+    const s = Math.round((Date.now() - LIVE.at) / 1000);
+    el.classList.add("on");
+    el.lastChild.textContent = "en vivo · hace " + (s < 60 ? s + " s" : Math.round(s / 60) + " min");
+  }
+  function applyLive() {
+    const alerts = [];
+    S.picks.forEach((p) => {
+      const lv = LIVE.prices[p.id];
+      if (lv && lv.usd && p.price) {
+        const since = (lv.usd / p.price - 1) * 100;
+        document.querySelectorAll(`[data-live-price="${CSS.escape(p.id)}"]`).forEach((el) => (el.textContent = price(lv.usd)));
+        document.querySelectorAll(`[data-live-since="${CSS.escape(p.id)}"]`).forEach((el) => {
+          el.hidden = false;
+          el.innerHTML = `desde escaneo <span class="${cls(since)}">${pct(since)}</span>`;
+        });
+        if (since <= -15) alerts.push({ id: p.id, cls: "bad", html: `${esc(p.symbol)} <b>${pct(since, 0)}</b> desde el escaneo` });
+        else if (since >= 25) alerts.push({ id: p.id, cls: "good", html: `${esc(p.symbol)} <b>${pct(since, 0)}</b> desde el escaneo` });
+      }
+      const lq = LIVE.liq[p.id];
+      if (lq != null && p.dex && p.dex.liquidity > 0 && lq < p.dex.liquidity * 0.6) {
+        alerts.push({ id: p.id, cls: "bad", html: `${esc(p.symbol)}: liquidez en DEX <b>${pct((lq / p.dex.liquidity - 1) * 100, 0)}</b> (${usd(lq)})` });
+      }
+    });
+    const box = $("#alerts");
+    box.hidden = !alerts.length;
+    box.innerHTML = alerts.length ? `<h3>${ICON.warn}Alertas en vivo</h3><div class="alert-list">${alerts.map((a) => `<button type="button" class="alert-chip ${a.cls}" data-open="${esc(a.id)}">${a.html}</button>`).join("")}</div>` : "";
+    setLiveStatus();
+  }
+  function startLive() {
+    if (!window.fetch || !/^https?:$/.test(location.protocol) && location.protocol !== "file:") return;
+    const ids = S.picks.map((p) => p.id).concat(["bitcoin"]).map(encodeURIComponent).join(",");
+    const tick = () => fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((d) => {
+        Object.entries(d || {}).forEach(([id, v]) => { if (v && typeof v.usd === "number") LIVE.prices[id] = { usd: v.usd, ch24: v.usd_24h_change }; });
+        LIVE.at = Date.now(); LIVE.ok = true; applyLive();
+      })
+      .catch(() => setLiveStatus())
+      .finally(() => setTimeout(tick, 60000));
+    tick();
+    const byChain = {};
+    S.picks.forEach((p) => { if (p.contract && p.dex && p.dex.chain) (byChain[p.dex.chain] = byChain[p.dex.chain] || []).push(p); });
+    const liq = () => Promise.all(Object.entries(byChain).map(([ch, ps]) =>
+      fetch(`https://api.dexscreener.com/tokens/v1/${encodeURIComponent(ch)}/${ps.map((p) => encodeURIComponent(p.contract.address)).join(",")}`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then((pairs) => {
+          const sum = {};
+          (Array.isArray(pairs) ? pairs : []).forEach((pr) => {
+            const a = ((pr.baseToken && pr.baseToken.address) || "").toLowerCase();
+            sum[a] = (sum[a] || 0) + ((pr.liquidity && pr.liquidity.usd) || 0);
+          });
+          ps.forEach((p) => { const v = sum[p.contract.address.toLowerCase()]; if (v != null) LIVE.liq[p.id] = v; });
+        }).catch(() => {})))
+      .then(() => { if (LIVE.ok) applyLive(); setTimeout(liq, 120000); });
+    liq();
+    setInterval(setLiveStatus, 5000);
+  }
+
+  // ---- tracking ----
+  function fday(d) {
+    try { return new Intl.DateTimeFormat("es-ES", { day: "numeric", month: "short", year: "numeric" }).format(new Date(d + "T12:00:00Z")); } catch (e) { return d; }
+  }
+  function renderTracking() {
+    const T = S.tracking;
+    if (!T) { $("#seguimiento").hidden = true; return; }
+    $("#horizons").innerHTML = Object.entries(T.horizons).map(([h, e]) => {
+      if (!e.cohorts) return `<div class="hz"><span class="label">A ${h} días</span><div class="pending">Primer resultado el ${esc(fday(e.first_result))}. Hace falta que pasen ${h} días desde la primera cohorte.</div></div>`;
+      return `<div class="hz"><span class="label">A ${h} días · ${INT.format(e.cohorts)} ${e.cohorts === 1 ? "cohorte" : "cohortes"}</span>
+        <div class="big ${cls(e.excess)}">${e.excess == null ? "—" : pct(e.excess, 1).replace(" %", " pts")}</div>
+        <div class="sub">frente a BTC. Selecciones ${pct(e.avg)} · BTC ${pct(e.btc)} · Universo ${pct(e.universe)}</div>
+        <div class="sub">Batieron a BTC en ${INT.format(e.beat_btc_cohorts)} de ${INT.format(e.cohorts)} cohortes · ${e.hit == null ? "—" : NF(0).format(e.hit) + " %"} de las monedas</div></div>`;
+    }).join("");
+    const rows = T.cohorts || [];
+    let h = `<thead><tr><th scope="col">Cohorte</th><th class="r" scope="col">Antigüedad</th><th class="r" scope="col">Selecciones</th><th class="r" scope="col">BTC</th><th class="r" scope="col">Universo</th><th class="r" scope="col">Exceso vs BTC</th><th class="r" scope="col">Baten a BTC</th><th scope="col">Mejor · peor</th></tr></thead><tbody>`;
+    rows.forEach((c) => {
+      const age = c.age_days < 1 ? `${INT.format(c.age_days * 24)} h` : `${INT.format(c.age_days)} d`;
+      h += `<tr><td>${esc(fday(c.date))}</td><td class="r">${age}</td><td class="r ${cls(c.avg)}">${pct(c.avg)}</td><td class="r ${cls(c.btc)}">${pct(c.btc)}</td><td class="r ${cls(c.universe)}">${pct(c.universe)}</td>
+        <td class="r ${cls(c.excess)}">${c.excess == null ? "—" : pct(c.excess).replace(" %", " pts")}</td><td class="r">${c.hit == null ? "—" : NF(0).format(c.hit) + " %"}</td>
+        <td class="best">${esc(c.best.symbol)} <span class="${cls(c.best.ret)}">${pct(c.best.ret, 0)}</span> · ${esc(c.worst.symbol)} <span class="${cls(c.worst.ret)}">${pct(c.worst.ret, 0)}</span></td></tr>`;
+    });
+    $("#cohorts").innerHTML = h + "</tbody>";
+    $("#track-note").textContent = rows.length <= 1
+      ? "Hoy empieza el historial: la primera cohorte se guardó con este escaneo. Los resultados a 7, 30 y 90 días aparecerán solos a medida que pasen los días."
+      : `Se siguen los precios de cada selección durante ${T.track_days} días. Rentabilidad sin comisiones ni deslizamiento; pasado no garantiza futuro.`;
+  }
+
   // ---- boot ----
   if (!S) {
     $("#picks").innerHTML = `<div class="empty">Todavía no hay datos. Ejecuta <code>python3 sniffer.py</code> para generar el primer escaneo.</div>`;
@@ -901,8 +1085,13 @@ code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surfa
   renderMap();
   initRadar();
   renderRadar();
+  renderTracking();
   renderMethod();
+  updateAge();
+  setInterval(updateAge, 60000);
+  initGithubRescan();
   initRescan();
+  startLive();
 
   document.addEventListener("click", (e) => {
     const c = e.target.closest("[data-copy]");
